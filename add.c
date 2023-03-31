@@ -27,7 +27,7 @@ void read_backup(NODE *parent_node, char *start_dir, char *current_dir);
    args[3] = time
 
    if dir add,
-   args[0] = start_dir
+   args[4] = start_dir
  */
 
 char hash_func[100];
