@@ -1,1383 +1,1152 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <time.h>
-#include <pwd.h>
-#include <dirent.h>
-#include <ftw.h>
-#include <errno.h>
-#include <openssl/md5.h>
-#include <openssl/sha.h>
+#include "ssu_header.h"
 
-#include "tree.h"
-#include "add.h"
-#include "remove.h"
+int RecoverFile(char *originPath, char *backupPath, char *newPath) {
+  fileNode *head = (fileNode *)malloc(sizeof(fileNode));
+  fileNode *curr = head;
+  struct dirent **namelist;
+  struct stat tmpbuf;
+  char *tmpPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *filepath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *filename = (char *)malloc(sizeof(char *) * NAMEMAX);
+  char *input = (char *)malloc(sizeof(char *) * STRMAX);
+  char *date = (char *)malloc(sizeof(char *) * STRMAX);
+  int fd1, fd2;
+  char *buf = (char *)malloc(sizeof(char *) * STRMAX);
+  int i;
+  int idx;
+  int cnt;
+  int num;
+  int len;
+  
+  strcpy(filepath, backupPath);
+  for(idx = strlen(filepath)-1; filepath[idx] != '/'; idx--);
 
-#define SCHOOL_ID 20192421
-#define BUFSIZE 1024*16
+  strcpy(filename, filepath+idx+1);
+  filepath[idx] = '\0';
+  
+  if((cnt = scandir(filepath, &namelist, NULL, alphasort)) == -1) {
+		fprintf(stderr, "ERROR: scandir error for %s\n", filepath);
+		return 1;
+  }
 
+  for(i = 0; i < cnt; i++) {
+    if(!strcmp(namelist[i]->d_name, ".") || !strcmp(namelist[i]->d_name, "..")) continue;
 
-void add_dir_tree(char *dir_name);
-void read_dir(NODE *parent, char *start_dir, char *current_dir);
-void read_backup(NODE *parent, char *start_dir, char *current_dir);
-void replace_backup_path(char *dest, char *input);
-void replace_abs_path(char *dest, char *input);
+    sprintf(tmpPath, "%s/%s", filepath, namelist[i]->d_name);
 
-void md5(FILE *f);
-void sha1(FILE *f);
+    if (lstat(tmpPath, &tmpbuf) < 0) {
+      fprintf(stderr, "ERROR: lstat error for %s\n", tmpPath);
+      return 1;
+    }
 
-void print_ssubackup_usage() 
-{
-	printf("Usage: ssu_backup <md5 | sha1>\n");
+    if(S_ISREG(tmpbuf.st_mode)) {
+      strcpy(tmpPath, namelist[i]->d_name);
+      tmpPath[strlen(tmpPath) - 13] = '\0';
+      if(strcmp(tmpPath, filename)) continue;
+
+      fileNode *new = (fileNode *)malloc(sizeof(fileNode));
+      sprintf(new->path, "%s/%s", filepath, namelist[i]->d_name);
+      new->statbuf = tmpbuf;
+      curr->next = new;
+      curr = curr->next;
+    }
+  }
+
+  if(head->next == NULL) {
+    printf("no backup file(s) of \"%s\"\n", originPath);
+    return 1;
+  } else if(head->next->next == NULL) {
+    if(access(newPath, F_OK) != -1 && !cmpHash(newPath, head->next->path)) {
+      printf("%s is not changed with %s\n", head->next->path, newPath);
+      return 1;
+    }
+
+    if((fd1 = open(head->next->path, O_RDONLY)) < 0) {
+      fprintf(stderr,"ERROR: open error for %s\n",head->next->path);	
+      return 1;
+    }
+
+    if((fd2 = open(newPath, O_CREAT | O_TRUNC | O_WRONLY, 777)) < 0) {
+      fprintf(stderr, "ERROR: open error for %s\n", newPath);
+      return 1;
+    }
+
+    while((len = read(fd1, buf, head->next->statbuf.st_size)) > 0) {
+      write(fd2, buf, len);
+    }
+
+    if(remove(head->next->path)) {
+      fprintf(stderr, "ERROR: remove error for %s", head->next->path);
+    }
+
+    printf("\"%s\" backup recover to \"%s\"\n", head->next->path, newPath);
+    free(head);
+  } else {
+    printf("backup files of \"%s\"\n", originPath);
+    printf("0. exit\n");
+    curr = head->next;
+    for(i = 1; curr != NULL; curr = curr->next) {
+      strcpy(date, curr->path + (strlen(curr->path) - 12));
+      printf("%d. %s\t%sbytes\n", i, date, cvtNumComma(curr->statbuf.st_size));
+      i++;
+    }
+    printf("Choose file to recover\n");
+    
+    while(true) {
+      printf(">> ");
+      fgets(input, sizeof(input), stdin);
+      input[strlen(input) - 1] = '\0';
+
+      num = atoi(input);
+      if(num < 0 || num >= i) {
+        printf("wrong input!\n");
+        continue;
+      }
+
+      if(num == 0) return 1;
+
+      curr = head->next;
+      for(i = 1; curr != NULL; curr = curr->next) {
+        if(i == num) {
+          if(access(newPath, F_OK) != -1 && !cmpHash(newPath, curr->path)) {
+            printf("%s is not changed with %s\n", curr->path, newPath);
+            return 1;
+          }
+
+          if((fd1 = open(curr->path, O_RDONLY)) < 0) {
+            fprintf(stderr,"ERROR: open error for %s\n", curr->path);	
+            return 1;
+          }
+
+          if((fd2 = open(newPath, O_CREAT | O_TRUNC | O_WRONLY, 777)) < 0) {
+            fprintf(stderr, "ERROR: open error for %s\n", newPath);
+            return 1;
+          }
+
+          while((len = read(fd1, buf, curr->statbuf.st_size)) > 0) {
+            write(fd2, buf, len);
+          }
+
+          if(remove(curr->path)) {
+            fprintf(stderr, "ERROR: remove error for %s", curr->path);
+          }
+
+          printf("\"%s\" backup recover to \"%s\"\n", curr->path, newPath);
+          free(curr);
+          break;
+        }
+        i++;
+      }
+
+      break;
+    }
+  }
+  return 0;
 }
 
-void print_add_usage() 
-{
-	printf("Usage : add <FILENAME> [OPTION]\n  -d : add directory recursive\n");
+int RecoverDir(char *originPath, char *backupPath, char *newPath) {
+  struct stat statbuf;
+  struct dirent **namelist;
+  char *tmpPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *tmpOriginPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *buf = (char *)malloc(sizeof(char *) * STRMAX);
+  char *date = (char *)malloc(sizeof(char *) * STRMAX);
+  char *input = (char *)malloc(sizeof(char *) * STRMAX);
+  int cnt;
+  int len;
+  int fd1, fd2;
+  int i;
+  int num;
+  dirNode *list = (dirNode *)malloc(sizeof(dirNode));
+  list->head = (fileNode *)malloc(sizeof(fileNode));
+  fileNode *curr = list->head;
+
+  if (lstat(backupPath, &statbuf) < 0) {
+    fprintf(stderr, "Usage : recover <FILENAME> [OPTION]\n");
+    return 1;
+  }
+
+  if(access(newPath, F_OK))
+    mkdir(newPath, 0777);
+  
+  if((cnt = scandir(backupPath, &namelist, NULL, alphasort)) == -1) {
+		fprintf(stderr, "ERROR: scandir error for %s\n", backupPath);
+		return 1;
+  }
+
+  for(int i = 0; i < cnt; i++) {
+    if(!strcmp(namelist[i]->d_name, ".") || !strcmp(namelist[i]->d_name, "..")) continue;
+
+    sprintf(tmpPath, "%s/%s", backupPath, namelist[i]->d_name);
+    if (lstat(tmpPath, &statbuf) < 0) {
+      fprintf(stderr, "ERROR: lstat error for %s\n", tmpPath);
+      return 1;
+    }
+
+    if(S_ISDIR(statbuf.st_mode)) {
+      dirNode *new = (dirNode *)malloc(sizeof(dirNode));
+      sprintf(tmpPath, "%s/%s", originPath, namelist[i]->d_name);
+      strcpy(new->path, tmpPath);
+      sprintf(tmpPath, "%s/%s", backupPath, namelist[i]->d_name);
+      strcpy(new->backupPath, tmpPath);
+      sprintf(tmpPath, "%s/%s", newPath, namelist[i]->d_name);
+      strcpy(new->newPath, tmpPath);
+      mainDirList->tail->next = new;
+      mainDirList->tail = mainDirList->tail->next;
+    } else if(S_ISREG(statbuf.st_mode)) {
+      sprintf(tmpOriginPath, "%s%s", homePATH, tmpPath + strlen(backupPATH));
+      tmpOriginPath[strlen(tmpOriginPath) - 13] = '\0';
+
+      backupNode *new = (backupNode *)malloc(sizeof(backupNode));
+      sprintf(new->backupPath, "%s/%s", backupPath, namelist[i]->d_name);
+      sprintf(new->newPath, "%s/%s", newPath, namelist[i]->d_name);
+      new->newPath[strlen(new->newPath)-13] = '\0';
+      if (lstat(new->backupPath, &(new->statbuf)) < 0) {
+        fprintf(stderr, "ERROR: lstat error for %s\n", new->backupPath);
+        return 1;
+      }
+
+      if(curr->next == NULL) {
+        curr->next = (fileNode *)malloc(sizeof(fileNode));
+        strcpy(curr->next->path, tmpOriginPath);
+        curr->next->head = (backupNode *)malloc(sizeof(backupNode));
+      } else if(strcmp(curr->next->path, tmpOriginPath)) {
+        curr = curr->next;
+        curr->next = (fileNode *)malloc(sizeof(fileNode));
+        strcpy(curr->next->path, tmpOriginPath);
+        curr->next->head = (backupNode *)malloc(sizeof(backupNode));
+      }
+
+      backupNode *currBackup = curr->next->head;
+      while(currBackup->next != NULL) {
+        currBackup = currBackup->next;
+      }
+      currBackup->next = new;
+    }
+  }
+
+  curr = list->head->next;
+  while(curr != NULL) {
+    backupNode *currBackup = curr->head->next;
+    if(currBackup->next == NULL) {
+      if(access(currBackup->newPath, F_OK) != -1 && !cmpHash(currBackup->newPath, currBackup->backupPath)) {
+        printf("%s is not changed with %s\n", currBackup->backupPath, currBackup->newPath);
+        curr = curr->next;
+        continue;
+      }
+
+      if((fd1 = open(currBackup->backupPath, O_RDONLY)) < 0) {
+        fprintf(stderr,"ERROR: open error for %s\n",currBackup->backupPath);	
+        return 1;
+      }
+
+      if((fd2 = open(currBackup->newPath, O_CREAT | O_TRUNC | O_WRONLY, 777)) < 0) {
+        fprintf(stderr, "ERROR: open error for %s\n", currBackup->newPath);
+        return 1;
+      }
+
+      while((len = read(fd1, buf, currBackup->statbuf.st_size)) > 0) {
+        write(fd2, buf, len);
+      }
+
+      if(remove(currBackup->backupPath)) {
+        fprintf(stderr, "ERROR: remove error for %s\n", currBackup->backupPath);
+      }
+
+      printf("\"%s\" backup recover to \"%s\"\n", currBackup->backupPath, currBackup->newPath);
+    } else {
+      printf("backup files of \"%s\"\n", curr->path);
+      printf("0. exit\n");
+      for(i = 1; currBackup != NULL; currBackup = currBackup->next) {
+        strcpy(date, currBackup->backupPath + (strlen(currBackup->backupPath) - 12));
+        printf("%d. %s\t%sbytes\n", i, date, cvtNumComma(currBackup->statbuf.st_size));
+        i++;
+      }
+      printf("Choose file to recover\n");
+      
+      while(true) {
+        printf(">> ");
+        fgets(input, sizeof(input), stdin);
+        input[strlen(input) - 1] = '\0';
+
+        num = atoi(input);
+        if(num < 0 || num >= i) {
+          printf("wrong input!\n");
+          continue;
+        }
+
+        if(num == 0) return 1;
+
+        currBackup = curr->head->next;
+        for(i = 1; currBackup != NULL; currBackup = currBackup->next) {
+          if(i == num) {
+            if(access(currBackup->newPath, F_OK) != -1 && !cmpHash(currBackup->newPath, currBackup->backupPath)) {
+              printf("%s is not changed with %s\n", currBackup->backupPath, currBackup->newPath);
+              curr = curr->next;
+              continue;
+            }
+
+            if((fd1 = open(currBackup->backupPath, O_RDONLY)) < 0) {
+              fprintf(stderr,"ERROR: open error for %s\n",currBackup->backupPath);	
+              return 1;
+            }
+
+            if((fd2 = open(currBackup->newPath, O_CREAT | O_TRUNC | O_WRONLY, 777)) < 0) {
+              fprintf(stderr, "ERROR: open error for %s\n", currBackup->newPath);
+              return 1;
+            }
+
+            while((len = read(fd1, buf, currBackup->statbuf.st_size)) > 0) {
+              write(fd2, buf, len);
+            }
+
+            if(remove(currBackup->backupPath)) {
+              fprintf(stderr, "ERROR: remove error for %s\n", currBackup->backupPath);
+            }
+
+            printf("\"%s\" backup recover to \"%s\"\n", currBackup->backupPath, currBackup->newPath);
+            
+            break;
+          }
+          i++;
+        }
+
+        break;
+      }
+    }
+    curr = curr->next;
+  }
 }
 
-void print_remove_usage() 
-{
-	printf("Usage : remove <FILENAME> [OPTION]\n");
-	printf("  -a : remove all file (recursive)\n");
-	printf("  -c : clear backup directory\n");
+int RecoverCommand(command_parameter *parameter) {
+	struct stat statbuf;
+  char *tmpPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *originPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *backupPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *newPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char **newPathList = NULL;
+  int newPathDepth = 0;
+  int i;
+
+  strcpy(originPath, parameter->filename);
+  sprintf(backupPath, "%s%s", backupPATH, originPath + strlen(homePATH));
+  if(parameter->commandopt & OPT_N) {
+    strcpy(newPath, parameter->tmpname);
+  } else {
+    strcpy(newPath, originPath);
+  }
+
+  strcpy(tmpPath, newPath);
+  if((newPathList = GetSubstring(tmpPath, &newPathDepth, "/")) == NULL) {
+    fprintf(stderr, "ERROR: %s can't be backuped\n", newPath);
+    return -1;
+  }
+
+  strcpy(tmpPath, "");
+  for(i = 0; i < newPathDepth-1; i++) {
+    strcat(tmpPath, "/");
+    strcat(tmpPath, newPathList[i]);
+
+    if(access(tmpPath, F_OK))
+      mkdir(tmpPath, 0777);
+  }
+
+  if(parameter->commandopt & OPT_D) {
+    mainDirList = (dirList *)malloc(sizeof(dirList));
+    dirNode *head = (dirNode *)malloc(sizeof(dirNode));
+    mainDirList->head = head;
+    dirNode *curr = head->next;
+    dirNode *new = (dirNode *)malloc(sizeof(dirNode));
+    strcpy(new->path, originPath);
+    strcpy(new->backupPath, backupPath);
+    strcpy(new->newPath, newPath);
+    curr = new;
+    mainDirList->tail = curr;
+
+    while(curr != NULL) {
+      RecoverDir(curr->path, curr->backupPath, curr->newPath);
+      curr = curr->next;
+    }
+  } else {
+    RecoverFile(originPath, backupPath, newPath);
+  }
 }
 
-void print_recover_usage() 
-{
-	printf("Usage : recover <FILENAME> [OPTION]\n");
-	printf("  -d : recover directory recursive\n");
-	printf("  -n <NEWNAME> : recover file with new name\n");
+int RemoveFile(char* path) {
+  fileNode *head = (fileNode *)malloc(sizeof(fileNode));
+  fileNode *curr = head;
+	struct stat statbuf, tmpbuf;
+  char *originPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *filepath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *filename = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *tmpPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *date = (char *)malloc(sizeof(char *) * PATHMAX);
+	struct dirent **namelist;
+  int cnt;
+  int idx;
+  int i;
+  char input[STRMAX];
+  int num;
+
+  sprintf(originPath, "%s%s", homePATH, path+strlen(backupPATH));
+
+  strcpy(filepath, path);
+  for(idx = strlen(filepath)-1; filepath[idx] != '/'; idx--);
+  strcpy(filename, filepath+idx+1);
+  filepath[idx] = '\0';
+
+  if (lstat(filepath, &statbuf) < 0) {
+    fprintf(stderr, "Usage : remove <FILENAME> [OPTION]\n");
+    return 1;
+  }
+
+  if((cnt = scandir(filepath, &namelist, NULL, alphasort)) == -1) {
+		fprintf(stderr, "ERROR: scandir error for %s\n", filepath);
+		return 1;
+  }
+
+  for(i = 0; i < cnt; i++) {
+    if(!strcmp(namelist[i]->d_name, ".") || !strcmp(namelist[i]->d_name, "..")) continue;
+
+    sprintf(tmpPath, "%s/%s", filepath, namelist[i]->d_name);
+
+    if (lstat(tmpPath, &tmpbuf) < 0) {
+      fprintf(stderr, "ERROR: lstat error for %s\n", tmpPath);
+      return 1;
+    }
+
+    if(S_ISREG(tmpbuf.st_mode)) {
+      strcpy(tmpPath, namelist[i]->d_name);
+      tmpPath[strlen(tmpPath) - 13] = '\0';
+      if(strcmp(tmpPath, filename)) continue;
+
+      fileNode *new = (fileNode *)malloc(sizeof(fileNode));
+      sprintf(new->path, "%s/%s", filepath, namelist[i]->d_name);
+      new->statbuf = tmpbuf;
+      curr->next = new;
+      curr = curr->next;
+    }
+  }
+
+  if(head->next == NULL) {
+    printf("no backup file(s) of \"%s\"\n", originPath);
+    return 1;
+  } else if(head->next->next == NULL) {
+    if(remove(head->next->path)) {
+      fprintf(stderr, "ERROR: remove error for %s", head->next->path);
+    }
+
+    printf("\"%s\" backup file removed\n", head->next->path);
+    free(head);
+  } else {
+    printf("backup files of \"%s\"\n", originPath);
+    printf("0. exit\n");
+    curr = head->next;
+    for(i = 1; curr != NULL; curr = curr->next) {
+      strcpy(date, curr->path + (strlen(curr->path) - 12));
+      printf("%d. %s\t%sbytes\n", i, date, cvtNumComma(curr->statbuf.st_size));
+      i++;
+    }
+    printf("Choose file to recover\n");
+    
+    while(true) {
+      printf(">> ");
+      fgets(input, sizeof(input), stdin);
+      input[strlen(input) - 1] = '\0';
+
+      num = atoi(input);
+      if(num < 0 || num >= i) {
+        printf("wrong input!\n");
+        continue;
+      }
+
+      if(num == 0) return 1;
+
+      curr = head->next;
+      for(i = 1; curr != NULL; curr = curr->next) {
+        if(i == num) {
+          if(remove(curr->path)) {
+            fprintf(stderr, "ERROR: remove error for %s", curr->path);
+          }
+
+          printf("\"%s\" backup file removed\n", curr->path);
+          free(curr);
+          break;
+        }
+        i++;
+      }
+
+      break;
+    }
+  }
+  return 0;
 }
 
-void print_help() 
-{
-	pid_t pid = fork();
-	if (pid == -1) printf("there's an error while calling help\n");
-	if (pid == 0) {
-		char *args[] = {NULL };
-		execv("./help", args);
+int RemoveAll(char* path, int flag, int *filecnt, int *dircnt) {
+	struct stat statbuf;
+  int cnt;
+  struct dirent **namelist;
+  char *tmpPath = (char *)malloc(sizeof(char) * PATHMAX);
+  int i;
+
+  if (lstat(path, &statbuf) < 0) {
+    fprintf(stderr, "Usage : remove <FILENAME> [OPTION]\n");
+    return 1;
+  }
+
+  if(S_ISDIR(statbuf.st_mode)) {
+    if((cnt = scandir(path, &namelist, NULL, alphasort)) == -1) {
+      fprintf(stderr, "ERROR: scandir error for %s\n", path);
+      return 1;
+    }
+
+    for(i = 0; i < cnt; i++) {
+      if(!strcmp(namelist[i]->d_name, ".") || !strcmp(namelist[i]->d_name, "..")) continue;
+
+      sprintf(tmpPath, "%s/%s", path, namelist[i]->d_name);
+      
+      RemoveAll(tmpPath, flag, filecnt, dircnt);
+    }
+    if(strcmp(path, backupPATH)) {
+      *dircnt += 1;
+    }
+  } else {
+    if(flag == 1) {
+      printf("\"%s\" backup file removed\n", path);
+    }
+    *filecnt += 1;
+  }
+  
+  if(strcmp(path, backupPATH)) {
+    remove(path);
+  } else {
+    if(*dircnt == 0 && *filecnt == 0) {
+      printf("no file(s) in the backup\n");
+    } else {
+      printf("backup directory cleared(%d regular files and %d subdirectories totally).\n", *filecnt, *dircnt);
+    }
+  }
+
+  return 0;
+}
+
+int RemoveCommand(command_parameter *parameter) {
+	struct stat statbuf;
+  int i;
+  char *backuptime;
+  char *originPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *backupPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *tmpPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char **backupPathList = NULL;
+  int backupPathDepth = 0;
+  int flag = 0;
+  int filecnt = 0;
+  int dircnt = 0;
+
+  strcpy(originPath, parameter->filename);
+  sprintf(backupPath, "%s%s", backupPATH, originPath + strlen(homePATH));
+
+  if(parameter->commandopt & OPT_C) {
+    strcpy(backupPath, backupPATH);
+    flag = 2;
+  }
+
+  if(parameter->commandopt & OPT_A) {
+    flag = 1;
+  }
+
+  if(flag == 0) {
+    RemoveFile(backupPath);
+  } else {
+    RemoveAll(backupPath, flag, &filecnt, &dircnt);
+  }
+
+  return 0;
+}
+
+int BackupFile(char *path, char *date) {
+  int len;
+  int fd1, fd2;
+  char *buf = (char *)malloc(sizeof(char *) * STRMAX);
+	struct stat statbuf, tmpbuf;
+	struct dirent **namelist;
+  int cnt;
+
+  char *filename = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *filepath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *tmpPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *tmpName = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *tmpdir = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *newPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  int idx;
+  int i;
+
+  char *filehash = (char *)malloc(sizeof(char *) * hash);
+  char *tmphash = (char *)malloc(sizeof(char *) * hash);
+
+  strcpy(filepath, path);
+  for(idx = strlen(filepath)-1; filepath[idx] != '/'; idx--);
+
+  strcpy(filename, filepath+idx+1);
+  filepath[idx] = '\0';
+
+  if (lstat(path, &statbuf) < 0) {
+    fprintf(stderr, "ERROR: lstat error for %s\n", path);
+    return 1;
+  }
+
+  ConvertHash(path, filehash);
+
+  sprintf(tmpdir, "%s%s", backupPATH, filepath+strlen(homePATH));
+
+  if((cnt = scandir(tmpdir, &namelist, NULL, alphasort)) == -1) {
+		fprintf(stderr, "ERROR: scandir error for %s\n", tmpdir);
+		return 1;
+  }
+
+  for(i = 0; i < cnt; i++) {
+    if(!strcmp(namelist[i]->d_name, ".") || !strcmp(namelist[i]->d_name, "..")) continue;
+
+    sprintf(tmpPath, "%s/%s", tmpdir, namelist[i]->d_name);
+
+    if (lstat(tmpPath, &tmpbuf) < 0) {
+      fprintf(stderr, "ERROR: lstat error for %s\n", tmpPath);
+      return 1;
+    }
+
+    if(S_ISREG(tmpbuf.st_mode)) {
+      strcpy(tmpName, namelist[i]->d_name);
+      tmpName[strlen(tmpName) - 13] = '\0';
+      if(strcmp(tmpName, filename)) continue;
+      if(statbuf.st_size != tmpbuf.st_size) continue;
+
+      ConvertHash(tmpPath, tmphash);
+      if(!strcmp(filehash, tmphash)) {
+        printf("\"%s\" is already backuped\n", tmpPath);
+        return 1;
+      }
+    }
+
+    strcpy(tmpPath, namelist[i]->d_name);
+  }
+
+  sprintf(newPath, "%s%s_%s", backupPATH, path+strlen(homePATH), date);
+
+  if((fd1 = open(path, O_RDONLY)) < 0) {
+		fprintf(stderr,"ERROR: open error for %s\n",path);
+		return 1;
+  }
+
+	if((fd2 = open(newPath, O_CREAT | O_TRUNC | O_WRONLY, 777)) < 0) {
+		fprintf(stderr, "ERROR: open error for %s\n", newPath);
+		return 1;
+  }
+
+	while((len = read(fd1, buf, statbuf.st_size)) > 0) {
+		write(fd2, buf, len);
 	}
-	while(waitpid(pid, NULL, WNOHANG) == 0) continue;
+
+  printf("\"%s\" backuped\n", newPath);
 }
 
-void check_exception(int argc, char **argv) 
-{
-	if ((argc != 2) || !(strcmp(argv[1], "md5") == 0 || strcmp(argv[1], "sha1") == 0)) {
-		print_ssubackup_usage();
-		exit(0);
-	}
-}
-int get_dir_count(const char *input) 
-{
-	char *s = (char* )malloc(sizeof(char *) * strlen(input));
-	strcpy(s, input);
-	char *token;
-	int count = 0;
+int BackupDir(char *path, char *date) {
+	struct dirent **namelist;
+	struct stat statbuf;
+  char *tmppath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *tmpdir = (char *)malloc(sizeof(char *) * PATHMAX);
+  int cnt;
 
-	token = strtok(s, "/");
-	while(token != NULL) {
-		count ++;
-		token = strtok(NULL, "/");
-	}
-	free(s);
-	return count;
-}
-char** split_dir(const char *input, int count) 
-{
-	char **words = (char **)malloc(sizeof(char*) * count);
-	for(int i=0; i<count; i++) {
-		words[i] = (char *)malloc(sizeof(char) * 256);
-	}
-	char *s = (char* )malloc(sizeof(char *) * strlen(input));
-	strcpy(s, input);
-	char *token;
-	int i = 0;
+  strcpy(tmpdir, backupPATH);
+  strcat(tmpdir, path+strlen(homePATH));
+  
+  if(access(tmpdir, F_OK))
+    mkdir(tmpdir, 0777);
+  
+  if((cnt = scandir(path, &namelist, NULL, alphasort)) == -1) {
+		fprintf(stderr, "ERROR: scandir error for %s\n", path);
+		return 1;
+  }
 
-	token = strtok(s, "/");
-	while(token != NULL) {
-		strcpy(words[i++], token);
-		token = strtok(NULL, "/");
-	}
-	free(s);
-	return words;
+  for(int i = 0; i < cnt; i++) {
+    if(!strcmp(namelist[i]->d_name, ".") || !strcmp(namelist[i]->d_name, "..")) continue;
+
+    strcpy(tmppath, path);
+    strcat(tmppath, "/");
+    strcat(tmppath, namelist[i]->d_name);
+    if (lstat(tmppath, &statbuf) < 0) {
+      fprintf(stderr, "ERROR: lstat error for %s\n", tmppath);
+      return 1;
+    }
+
+    if(S_ISDIR(statbuf.st_mode)) {
+      dirNode *new = (dirNode *)malloc(sizeof(dirNode));
+      strcpy(new->path, tmppath);
+      mainDirList->tail->next = new;
+      mainDirList->tail = mainDirList->tail->next;
+    } else if(S_ISREG(statbuf.st_mode)) {
+      BackupFile(tmppath, date);
+    }
+  }
 }
 
+int AddCommand(command_parameter *parameter) {
+	struct stat statbuf;
+  char *backuptime;
+  char *tmpPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *originPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char *newBackupPath = (char *)malloc(sizeof(char *) * PATHMAX);
+  char **backupPathList = NULL;
+  int backupPathDepth = 0;
+  int i;
 
-int get_word_count(const char *input) 
-{
-	char *s = (char* )malloc(sizeof(char *) * strlen(input));
-	strcpy(s, input);
-	char *token;
-	int count = 0;
+  strcpy(originPath, parameter->filename);
 
-	token = strtok(s, " ");
-	while(token != NULL) {
-		count ++;
-		token = strtok(NULL, " ");
-	}
-	free(s);
-	return count;
+  if (lstat(originPath, &statbuf) < 0) {
+    fprintf(stderr, "ERROR: lstat error for %s\n", originPath);
+    return 1;
+  }
+
+  if(!S_ISREG(statbuf.st_mode) && !S_ISDIR(statbuf.st_mode)) {
+    fprintf(stderr, "ERROR: %s is not directory or regular file\n", originPath);
+    return -1;
+  }
+
+  if(S_ISDIR(statbuf.st_mode) && !(parameter->commandopt & OPT_D)) {
+    fprintf(stderr, "ERROR: %s is a directory file\n", originPath);
+    return -1;
+  }
+
+
+  sprintf(newBackupPath, "%s%s", backupPATH, originPath + strlen(homePATH));
+  if((backupPathList = GetSubstring(newBackupPath, &backupPathDepth, "/")) == NULL) {
+    fprintf(stderr, "ERROR: %s can't be backuped\n", originPath);
+    return -1;
+  }
+
+  strcpy(tmpPath, "");
+  for(i = 0; i < backupPathDepth-1; i++) {
+    strcat(tmpPath, "/");
+    strcat(tmpPath, backupPathList[i]);
+
+    if(access(tmpPath, F_OK))
+      mkdir(tmpPath, 0777);
+  }
+  
+  if(S_ISREG(statbuf.st_mode)) {
+    BackupFile(originPath, getDate());
+  } else if(S_ISDIR(statbuf.st_mode)) {
+    mainDirList = (dirList *)malloc(sizeof(dirList));
+    dirNode *head = (dirNode *)malloc(sizeof(dirNode));
+    mainDirList->head = head;
+    dirNode *curr = head->next;
+    dirNode *new = (dirNode *)malloc(sizeof(dirNode));
+    strcpy(new->path, originPath);
+    curr = new;
+    mainDirList->tail = curr;
+
+    while(curr != NULL) {
+      BackupDir(curr->path, getDate());
+      curr = curr->next;
+    }
+  }
+  
+  return 0;
 }
 
-char** split_input(const char *input, int count) 
-{
-	char **words = (char **)malloc(sizeof(char*) * count);
-	for(int i=0; i<count; i++) {
-		words[i] = (char *)malloc(sizeof(char) * 256);
-	}
-	char *s = (char* )malloc(sizeof(char *) * strlen(input));
-	strcpy(s, input);
-	char *token;
-	int i = 0;
+void CommandFun(char **arglist) {
+  int (*commandFun)(command_parameter * parameter);
+	command_parameter parameter={
+    arglist[0], arglist[1], arglist[2], atoi(arglist[3])
+  };
 
-	token = strtok(s, " ");
-	while(token != NULL) {
-		strcpy(words[i++], token);
-		token = strtok(NULL, " ");
-	}
-	free(s);
-	return words;
+  if(!strcmp(parameter.command, commanddata[0])) {
+    commandFun = AddCommand;
+  } else if(!strcmp(parameter.command, commanddata[1])) {
+    commandFun = RemoveCommand;
+  } else if(!strcmp(parameter.command, commanddata[2])) {
+    commandFun = RecoverCommand;
+  }
+
+  if(commandFun(&parameter) != 0) {
+    exit(1);
+  }
 }
 
-char** copy_double_pointer(char **words, int count) 
-{
-	char **temp = (char **)malloc(sizeof(char*) * count);
-	for(int i=0; i<count; i++) {
-		temp[i] = (char *)malloc(sizeof(char) * (strlen(words[i]) + 1));
-		strcpy(temp[i], words[i]);
-	}
-	return temp;
-}	
+void CommandExec(command_parameter parameter) {
+  pid_t pid;
 
-char* get_current_time() 
-{
-	static char time_buf[30];
-	time_t currentTime = time(NULL);
-	struct tm *local = localtime(&currentTime);
-	sprintf(time_buf, "%02d%02d%02d%02d%02d%02d",
-			local->tm_year - 100, local->tm_mon + 1, local->tm_mday,
-			local->tm_hour, local->tm_min, local->tm_sec);
-	return time_buf;
+  parameter.argv[0] = "command";
+  parameter.argv[1] = (char *)malloc(sizeof(char *) * 32);
+  sprintf(parameter.argv[1], "%d", hash);
+
+  parameter.argv[2] = parameter.command;
+  parameter.argv[3] = parameter.filename;
+  parameter.argv[4] = parameter.tmpname;
+  parameter.argv[5] = (char *)malloc(sizeof(char *) * 32);
+  sprintf(parameter.argv[5], "%d", parameter.commandopt);
+  parameter.argv[6] = (char *)0;
+
+  if((pid = fork()) < 0) {
+    fprintf(stderr, "ERROR: fork error\n");
+    exit(1);
+  } else if(pid == 0) {
+    execv(exeNAME, parameter.argv);
+    exit(0);
+  } else {
+    pid = wait(NULL);
+  }
 }
 
+void SystemExec(char **arglist) {
+  pid_t pid;
+  char whichPath[PATHMAX];
 
-char *hash_func;
-char hash[100];
+  sprintf(whichPath, "/usr/bin/%s", arglist[0]);
 
-char *home_dir;
-char backup_dir[4096];
-NODE *HEAD;
-NODE *BACKUP_NODE;
+  if((pid = fork()) < 0) {
+    fprintf(stderr, "ERROR: fork error\n");
+    exit(1);
+  } else if(pid == 0) {
+    execv(whichPath, arglist);
+    exit(0);
+  } else {
+    pid = wait(NULL);
+  }
+}
 
+void HelpExec() {
+  pid_t pid;
 
-int main(int argc, char* argv[]) 
-{
-	// 예외 검사
-	check_exception(argc, argv);
-	// 해시 방법 저장
-	hash_func = argv[1];
+  if((pid = fork()) < 0) {
+    fprintf(stderr, "ERROR: fork error\n");
+    exit(1);
+  } else if(pid == 0) {
+    execl(exeNAME, "help", (char *)0);
+    exit(0);
+  } else {
+    pid = wait(NULL);
+  }
+}
 
-	if ((home_dir = getenv("HOME")) == NULL) {
-		home_dir = getpwuid(getuid())->pw_dir;
-	}
-	sprintf(backup_dir, "%s/backup", home_dir);
+void ParameterInit(command_parameter *parameter) {
+  parameter->command = (char *)malloc(sizeof(char *) * PATH_MAX);
+  parameter->filename = (char *)malloc(sizeof(char *) * PATH_MAX);
+  parameter->tmpname = (char *)malloc(sizeof(char *) * PATH_MAX);
+	parameter->commandopt = 0;
+}
 
+int ParameterProcessing(int argcnt, char **arglist, int command, command_parameter *parameter) {
+	struct stat buf;
+  optind = 0;
+  opterr = 0;
+	int lastind;
+	int option;
+	int optcnt = 0;
 
-	if (access(backup_dir, F_OK) < 0) {
-		mkdir(backup_dir, 0755);
-	} 
+	switch(command) {
+		case CMD_ADD: {
+			if (argcnt < 2) {
+				fprintf(stderr, "Usage : %s <FILENAME> [OPTION]\n", arglist[0]);
+				return -1;
+			}
 
-	char *time = get_current_time();
+      if(ConvertPath(arglist[1], parameter->filename) != 0) {
+        fprintf(stderr, "ERROR: %s is invalid filepath\n", parameter->filename);
+        return -1;
+      }
 
-	HEAD = (NODE *)calloc(1, sizeof(NODE));
-	strcpy(HEAD->abs_path, backup_dir);
-	strcpy(HEAD->backup_path, backup_dir);
-	HEAD->is_dir = 1;
-	HEAD->is_reg = 1;
+      if(strncmp(parameter->filename, homePATH, strlen(homePATH))
+      || !strncmp(parameter->filename, backupPATH, strlen(backupPATH))
+      || !strcmp(parameter->filename, homePATH)) {
+        fprintf(stderr, "ERROR: %s can't be backuped\n", parameter->filename);
+        return -1;
+      }
 
-	BACKUP_NODE = (NODE *)calloc(1, sizeof(NODE));
-	strcpy(BACKUP_NODE->abs_path, backup_dir);
-	strcpy(BACKUP_NODE->backup_path, backup_dir);
-	BACKUP_NODE->is_dir = 1;
-	BACKUP_NODE->is_reg = 1;
+      if (lstat(parameter->filename, &buf) < 0) {
+        fprintf(stderr, "ERROR: lstat error for %s\n", parameter->filename);
+        return -1;
+      }
 
-	while (1) {
-		if (access(backup_dir, F_OK) < 0) {
-			mkdir(backup_dir, 0755);
-		} 
+      if(!S_ISREG(buf.st_mode) && !S_ISDIR(buf.st_mode)) {
+        fprintf(stderr, "ERROR: %s is not regular file\n", parameter->filename);
+        return -1;
+      }
 
-		char input[201] = {0};
-		printf("%d> ", SCHOOL_ID);
-		fgets(input, 200, stdin);
-		input[strcspn(input, "\n")] = '\0';
+			lastind = 2;
 
-		if (strlen(input) == 0) {
-			continue;
+			while((option = getopt(argcnt, arglist, "d")) != -1) {
+        if(option != 'd') {
+          fprintf(stderr, "ERROR: unknown option %c\n", optopt);
+          return -1;
+        }
+
+        if(optind == lastind) {
+          fprintf(stderr, "ERROR: wrong option input\n");
+          return -1;
+        }
+
+        if(option == 'd')	{
+          if(parameter->commandopt & OPT_D) {
+            fprintf(stderr, "ERROR: duplicate option -%c\n", option);
+            return -1;
+          }
+          parameter->commandopt |= OPT_D;
+        }
+
+        optcnt++;
+				lastind = optind;
+			}
+			if(argcnt - optcnt != 2) {
+				fprintf(stderr, "ERROR: argument error\n");
+				return -1;
+			}
+			break;
+    }
+		case CMD_REM: {
+			if (argcnt < 2) {
+				fprintf(stderr, "Usage : %s <FILENAME> [OPTION]\n", arglist[0]);
+				return -1;
+			}
+      
+      parameter->filename = arglist[1];
+
+			lastind = 1;
+
+			while((option = getopt(argcnt, arglist, "ac")) != -1) {
+        if(option != 'a' && option != 'c') {
+          fprintf(stderr, "ERROR: unknown option %c\n", optopt);
+          return -1;
+        }
+
+        if(optind == lastind) {
+          fprintf(stderr, "ERROR: wrong option input\n");
+          return -1;
+        }
+        
+        if(option == 'a')	{
+          if(parameter->commandopt & OPT_A) {
+            fprintf(stderr, "ERROR: duplicate option -%c\n", option);
+            return -1;
+          }
+          parameter->commandopt |= OPT_A;
+        }
+        
+        if(option == 'c')	{
+          if(parameter->commandopt & OPT_C) {
+            fprintf(stderr, "ERROR: duplicate option -%c\n", option);
+            return -1;
+          }
+          parameter->commandopt |= OPT_C;
+        }
+
+        optcnt++;
+				lastind = optind;
+			}
+
+      if(parameter->commandopt & OPT_A && parameter->commandopt & OPT_C) {
+				fprintf(stderr, "ERROR: option -a and -c can't use concurrency\n");
+				return -1;
+      }
+      
+			if(((parameter->commandopt & OPT_A) && argcnt - optcnt != 2)
+      || ((parameter->commandopt & OPT_C) && argcnt - optcnt != 1)) {
+				fprintf(stderr, "ERROR: argument error\n");
+				return -1;
+			}
+
+      if(parameter->commandopt & OPT_C) {
+        break;
+      }
+
+      if(ConvertPath(parameter->filename, parameter->filename) != 0) {
+        fprintf(stderr, "ERROR: %s is invalid filepath\n", parameter->filename);
+        return -1;
+      }
+
+      if(strncmp(parameter->filename, homePATH, strlen(homePATH))
+      || !strncmp(parameter->filename, backupPATH, strlen(backupPATH))
+      || !strcmp(parameter->filename, homePATH)) {
+        fprintf(stderr, "ERROR: %s can't be backuped\n", parameter->filename);
+        return -1;
+      }
+      
+			break;
+    }
+		case CMD_REC: {
+			if (argcnt < 2) {
+				fprintf(stderr, "Usage : %s <FILENAME> [OPTION]\n", arglist[0]);
+				return -1;
+			}
+      
+      if(ConvertPath(arglist[1], parameter->filename) != 0) {
+        fprintf(stderr, "ERROR: %s is invalid filepath\n", parameter->filename);
+        return -1;
+      }
+
+      if(strncmp(parameter->filename, homePATH, strlen(homePATH))
+      || !strncmp(parameter->filename, backupPATH, strlen(backupPATH))
+      || !strcmp(parameter->filename, homePATH)) {
+        fprintf(stderr, "ERROR: %s can't be backuped\n", parameter->filename);
+        return -1;
+      }
+
+			lastind = 2;
+
+			while((option = getopt(argcnt, arglist, "dn:")) != -1) {
+        if(option != 'd' && option != 'n') {
+          fprintf(stderr, "ERROR: unknown option %c\n", optopt);
+          return -1;
+        }
+
+        if(optind == lastind) {
+          fprintf(stderr, "ERROR: wrong option input\n");
+          return -1;
+        }
+
+        if(option == 'd')	{
+          if(parameter->commandopt & OPT_D) {
+            fprintf(stderr, "ERROR: duplicate option -%c\n", option);
+            return -1;
+          }
+          parameter->commandopt |= OPT_D;
+        }
+
+        if(option == 'n')	{
+          if(parameter->commandopt & OPT_N) {
+            fprintf(stderr, "ERROR: duplicate option -%c\n", option);
+            return -1;
+          }
+
+          if(optarg == NULL) {
+            fprintf(stderr, "ERROR: <NEWNAME> is null\n");
+            return -1;
+          }
+
+          if(ConvertPath(optarg, parameter->tmpname) != 0) {
+            fprintf(stderr, "ERROR: %s is invalid filepath\n", parameter->tmpname);
+            return -1;
+          }
+
+          if(strncmp(parameter->tmpname, homePATH, strlen(homePATH))
+          || !strncmp(parameter->tmpname, backupPATH, strlen(backupPATH))
+          || !strcmp(parameter->tmpname, homePATH)) {
+            fprintf(stderr, "ERROR: %s can't be backuped\n", parameter->tmpname);
+            return -1;
+          }
+
+          parameter->commandopt |= OPT_N;
+          optcnt++;
+        }
+
+        optcnt++;
+				lastind = optind;
+			}
+			if(argcnt - optcnt != 2) {
+				fprintf(stderr, "argument error\n");
+				return -1;
+			}
+			break;
+    }
+  }
+}
+
+int Prompt() {
+  char input[STRMAX];
+	int argcnt = 0;
+	char **arglist = NULL;
+  int command;
+	command_parameter parameter={(char *)0, (char *)0, (char *)0, 0};
+
+  while(true) {
+    printf("20230000> ");
+    fgets(input, sizeof(input), stdin);
+    input[strlen(input) - 1] = '\0';
+
+		if((arglist = GetSubstring(input, &argcnt, " \t")) == NULL) {
+      continue;
+    }
+
+    if(argcnt == 0) continue;
+
+		if(!strcmp(arglist[0], commanddata[0])) {
+			command = CMD_ADD;
+		} else if(!strcmp(arglist[0], commanddata[1])) {
+			command = CMD_REM;
+		}	else if(!strcmp(arglist[0], commanddata[2])) {
+			command = CMD_REC;
+		}	else if(!strcmp(arglist[0], commanddata[3])) {
+			command = CMD_SYS;
+		}	else if(!strcmp(arglist[0], commanddata[4])) {
+			command = CMD_SYS;
+		}	else if(!strcmp(arglist[0], commanddata[5])) {
+			command = CMD_SYS;
+		}	else if(!strcmp(arglist[0], commanddata[6])) {
+			command = CMD_HELP;
+		}	else if(!strcmp(arglist[0], commanddata[7])) {
+			command = CMD_EXIT;
+      fprintf(stdout, "Program exit(0)\n");
+      exit(0);
+		}	else {
+			command = NOT_CMD;
 		}
 
-		int word_count = get_word_count(input);
-		char **words = split_input(input, word_count);
-
-		// 옵션들
-		int option_d = 0;
-		int option_n = 0;
-		int option_a = 0;
-		int option_c = 0;
-		int err = 0;
-		int param_opt = -1;
-		opterr = 0;
-		optind = 0;
-
-		char **temp_words = copy_double_pointer(words, word_count);
-		while((param_opt = getopt(word_count, temp_words, "dnca")) != -1) {
-			switch(param_opt) {
-				case 'd' :	
-					option_d = 1; 
-					break;
-				case 'n' :	
-					option_n = 1; 
-					break;
-				case 'a' :	
-					option_a = 1; 
-					break;
-				case 'c' :	
-					option_c = 1; 
-					break;
-				case '?' :
-					err = 1;
-					break;
-			}
-		}
-
-		for (int i=0; i<word_count; i++)
-			free(temp_words[i]);
-		free(temp_words);
-
-		// 백업 트리 초기화
-		if (BACKUP_NODE->child != NULL) {
-			reset_backup_tree(BACKUP_NODE->child);
-			BACKUP_NODE->child = NULL;
-		}
-
-		// 백업 디렉토리 트리 만들기
-		read_backup(BACKUP_NODE, backup_dir, backup_dir);
-
-		const char const *command = words[0];
-
-		if (strcmp(command, "add") == 0) {
-			if (word_count < 2 || word_count > 3) {
-				print_add_usage();
-				continue;
-			}
-
-			if (strstr(words[1], "~") != NULL) {
-				char temp[4096] = {0};
-				char *p = strstr(words[1], "~");
-				memcpy(temp, home_dir, strlen(home_dir));
-				memcpy(temp + strlen(home_dir), p + 1, strlen(words[1]) - 1);
-				free(words[1]);
-				words[1] = (char *)calloc(1, strlen(temp)+1);
-				strcpy(words[1], temp);
-			}
-
-			char path_length[10000] = {0};
-			realpath(words[1], path_length);
-			if (strlen(path_length) > 4096) {
-				fprintf(stderr, "file path can't be longer than 4096\n");
-				continue;
-			}
-			char abs_path[4096] = {0};
-			strcpy(abs_path, path_length);
-
-			if (strstr(abs_path, home_dir) == NULL) {
-				printf("\"%s\" can't be backuped\n", words[1]);
-				continue;
-			}
-			if (strstr(abs_path, backup_dir) != NULL) {
-				fprintf(stderr, "\"%s\" can't be backuped\n", words[1]);
-				continue;
-			}
-			if ((word_count == 2 || word_count == 3) && (access(abs_path, F_OK) < 0)) {
-				print_add_usage();
-				continue;
-			}
-			struct stat statbuf;
-			lstat(words[1], &statbuf);
-
-			if (access(abs_path, F_OK) < 0) {
-				fprintf(stderr, "\"%s\" not exists\n", words[1]);
-				continue;
-			}
-
-			if (access(abs_path, R_OK) < 0) {
-				fprintf(stderr, "cannot access \"%s\"\n", abs_path);
-				continue;
-			}
-
-			int is_reg = S_ISREG(statbuf.st_mode);
-			int is_dir = S_ISDIR(statbuf.st_mode); 
-
-			if (!(is_reg || is_dir)) {
-				printf("only regular or directory file can backup\n");
-				continue;
-			}
-
-			if (is_reg && word_count == 3) {
-				print_add_usage();
-				continue;
-			}
-
-			if (is_dir && word_count == 2) {
-				fprintf(stderr, "\"%s\" is a directory file\n", words[1]);
-				continue;
-			}
-
-			if (word_count == 3) {
-				if (!option_d) {
-					print_add_usage();
-					continue;
-				}
-			}
-
-			char backup_path[4096] = {0};
-			strcpy(backup_path, backup_dir);
-			memcpy(backup_path + strlen(backup_dir), abs_path + strlen(home_dir), strlen(abs_path) - strlen(home_dir));
-
-			// 파일 add
-			if (is_reg) {
-				char *last_token = strrchr(abs_path, '/');
-				char parent_dir_path[4096] = {0};
-				memcpy(parent_dir_path, abs_path, strlen(abs_path) - strlen(last_token));
-
-				struct stat buf;
-				lstat(parent_dir_path, &buf);
-
-				// 디렉토리 create 
-				add_dir_tree(parent_dir_path);
-
-				char filename[256] = {0};
-				memcpy(filename, last_token + 1, strlen(last_token)-1);
-				NODE *pNODE = find_node_by_abs_path(HEAD, parent_dir_path);
-				NODE *cNODE = (NODE *)calloc(1, sizeof(NODE));
-
-				strcpy(cNODE->abs_path, abs_path);
-				strcpy(cNODE->backup_path, backup_path);
-				strcpy(cNODE->parent_path, pNODE->backup_path);
-				strcpy(cNODE->filename, filename);
-				cNODE->is_reg = 1;
-				strcpy(cNODE->time, get_current_time());
-				strcpy(cNODE->abs_path_time, abs_path);
-				strcat(cNODE->abs_path_time, "_");
-				strcat(cNODE->abs_path_time, cNODE->time);
-
-				// hash
-				FILE *IN = fopen(abs_path, "r");
-				md5(IN);
-				strcpy(cNODE->hash_md5, hash);
-				memset(hash, 0, sizeof(hash));
-				fclose(IN);
-
-				FILE *IN2 = fopen(abs_path, "r");
-				sha1(IN2);
-				strcpy(cNODE->hash_sha1, hash);
-				memset(hash, 0, sizeof(hash));
-				fclose(IN2);
-
-				// 트리 업데이트
-				if (BACKUP_NODE->child != NULL) {
-					reset_backup_tree(BACKUP_NODE->child);
-					BACKUP_NODE->child = NULL;
-				}
-				read_backup(BACKUP_NODE, backup_dir, backup_dir);
-
-				// 트리에 노드 추가
-				add_child(pNODE, cNODE);
-			} else if (is_dir) {  // 디렉토리 add
-
-				realpath(words[1], abs_path);
-
-				if (strcmp(abs_path, home_dir) != 0) {
-					add_dir_tree(abs_path);
-
-					pid_t pid = fork();
-					if (pid == 0) {
-						char *args[10] = {0};
-						/*
-						   args[0] = start_dir 
-						   args[1] = backup_dir
-						   args[2] = home_dir
-						   args[3] = hash_func
-						   args[4] = time 
-						 */
-						args[0] = abs_path; 
-						args[1] = backup_dir; 
-						args[2] = home_dir; 
-						args[3] = hash_func; 
-						args[4] = time; 
-						execv("./add", args);
-					} 
-					while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-				} else {
-					pid_t pid = fork();
-					if (pid == 0) {
-						char *args[10] = {0};
-
-						//   args[0] = start_dir 
-						//   args[1] = backup_dir
-						//   args[2] = home_dir
-						//   args[3] = hash_func
-						//   args[4] = time 
-
-						args[0] = home_dir; 
-						args[1] = backup_dir; 
-						args[2] = home_dir; 
-						args[3] = hash_func; 
-						args[4] = time; 
-						execv("./add", args);
-					}
-					while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-				}
-			}
-		} else if (strcmp(command, "remove") == 0) {
-
-			if (strstr(words[1], "~") != NULL) {
-				char temp[4096] = {0};
-				char *p = strstr(words[1], "~");
-				memcpy(temp, home_dir, strlen(home_dir));
-				memcpy(temp + strlen(home_dir), p + 1, strlen(words[1]) - 1);
-				free(words[1]);
-				words[1] = (char *)calloc(1, strlen(temp)+1);
-				strcpy(words[1], temp);
-			}
-			if (word_count < 2 || word_count > 3) {
-				print_remove_usage();
-				continue;
-			}
-
-			if (option_c && word_count != 2) {
-				print_remove_usage();
-				continue;
-			}
-
-			if (err || (option_a && option_c)) {
-				print_remove_usage();
-				continue;
-			}
-
-			char path_length[10000] = {0};
-			replace_abs_path(path_length, words[1]);
-			if (strlen(path_length) > 4096) {
-				fprintf(stderr, "file path can't be longer than 4096\n");
-				continue;
-			}
-
-			char abs_path[4096] = {0};
-			strcpy(abs_path, path_length);
-
-			if (strstr(abs_path, home_dir) == NULL) {
-				printf("\"%s\" can't be backuped\n", words[1]);
-				continue;
-			}
-
-			if (strstr(abs_path, backup_dir) != NULL) {
-				printf("\"%s\" can't be backuped\n", words[1]);
-				continue;
-			}
-			char backup_path[4096] = {0};
-			replace_backup_path(backup_path, words[1]);
-
-
-			NODE *file = find_node_by_abs_path(BACKUP_NODE, backup_path);
-
-			int is_reg = 0;
-			int is_dir = 0;
-
-			if (file != NULL) {
-				is_reg = file->is_reg;
-				is_dir = file->is_dir;
-				if (is_reg) {
-					if (access(file->abs_path_time, R_OK) < 0) {
-						fprintf(stderr, "cannot access to \"%s\"\n", words[1]);
-						continue;
-					}
-				} else if (is_dir && !option_a) {
-					fprintf(stderr, "remove directory need option -a\n");
-					continue;
-				}
-			}
-
-			if (file == NULL && !option_c && !option_a) {
-				fprintf(stderr, "file not exists.\n");
-				continue;
-			}
-
-			// 옵션 c
-			if (option_c) {
-				pid_t pid = fork();
-				if (pid == 0) {
-					char *args[10] = {0};
-					/*
-					   args[0] = home_dir 
-					   args[1] = backup_dir
-					   args[2] = filename's full path
-					   args[3] = backup_path
-					   args[4] = parent_path
-					   args[5] = REG or DIR
-					   args[6] = hash_func
-					   args[7] = input 
-					   args[8] = option - a or c
-					 */
-					args[0] = home_dir; 
-					args[1] = backup_dir; 
-					args[2] = abs_path; 
-					args[3] = backup_dir; 
-					args[4] = ""; 
-					args[5] = "DIR";
-					args[6] = hash_func;
-					args[7] = words[1];
-					args[8] = "c";
-
-					execv("./remove", args);
-				}
-				while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-			} else if (option_a) {  // 옵션 a
-				pid_t pid = fork();
-				if (pid == 0) {
-					char *args[10] = {0};
-					/*
-					   args[0] = home_dir 
-					   args[1] = backup_dir
-					   args[2] = filename's full path
-					   args[3] = backup_path
-					   args[4] = parent_path
-					   args[5] = REG or DIR
-					   args[6] = hash_func
-					   args[7] = input 
-					   args[8] = option - a or c
-					 */
-					args[0] = home_dir; 
-					args[1] = backup_dir; 
-					args[2] = abs_path; 
-					args[3] = backup_path; 
-					args[4] = ""; 
-					args[5] = "DIR";
-					args[6] = hash_func;
-					args[7] = words[1];
-					args[8] = "a";
-
-					execv("./remove", args);
-				}
-				while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-
-			} else if (is_reg) {  // 파일 remove
-				pid_t pid = fork();
-				if (pid == 0) {
-					char *args[10] = {0};
-					/*
-					   args[0] = home_dir 
-					   args[1] = backup_dir
-					   args[2] = filename's full path
-					   args[3] = backup_path
-					   args[4] = parent_path
-					   args[5] = REG or DIR
-					   args[6] = hash_func
-					   args[7] = input 
-					   args[8] = option - a or c
-					 */
-					args[0] = home_dir; 
-					args[1] = backup_dir; 
-					args[2] = abs_path; 
-					args[3] = backup_path; 
-					args[4] = file->parent_path; 
-					args[5] = "REG";
-					args[6] = hash_func;
-					args[7] = words[1];
-					args[8] = "";
-					if (option_a == 1) args[8] = home_dir;
-					else if (option_c == 1) args[8] = backup_dir;
-
-					execv("./remove", args);
-				}
-				while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-			} else if (is_dir) {  // 디렉토리 remove
-				pid_t pid = fork();
-				if (pid == 0) {
-					char *args[10] = {0};
-					/*
-					   args[0] = home_dir 
-					   args[1] = backup_dir
-					   args[2] = filename's full path
-					   args[3] = backup_path
-					   args[4] = parent_path
-					   args[5] = REG or DIR
-					   args[6] = hash_func
-					   args[7] = input 
-					   args[8] = option
-					 */
-					args[0] = home_dir; 
-					args[1] = backup_dir; 
-					args[2] = abs_path; 
-					if (option_c || option_a) {
-						args[3] = backup_dir;
-						args[4] = "";
-					} else {
-						args[3] = backup_path; 
-						args[4] = file->parent_path; 
-					}
-					args[5] = "DIR";
-					args[6] = hash_func;
-					args[7] = words[1];
-					args[8] = "a";
-					execv("./remove", args);
-				}
-				while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-			}
-		} else if (strcmp(command, "recover") == 0) {
-			if (word_count < 2 || word_count > 5) {
-				print_recover_usage();
-				continue;
-			}
-
-			char path_length[10000] = {0};
-			replace_abs_path(path_length, words[1]);
-
-			if (strlen(path_length) > 4096) {
-				fprintf(stderr, "file path can't be longer than 4096\n");
-				continue;
-			}
-
-			char abs_path[4096] = {0};
-			strcpy(abs_path, path_length);
-
-			char backup_path[4096] = {0};
-			replace_backup_path(backup_path, words[1]);
-
-			if (strstr(words[1], "-") != NULL) {
-				print_recover_usage();
-				continue;
-			}
-			if (strstr(abs_path, home_dir) == NULL) {
-				fprintf(stderr, "\"%s\" can't be backuped\n", words[1]);
-				continue;
-			}
-			if (strstr(abs_path, backup_dir) != NULL) {
-				fprintf(stderr, "\"%s\" can't be backuped\n", words[1]);
-				continue;
-			}
-			NODE *file = find_node_by_abs_path(BACKUP_NODE, backup_path);
-
-			if (file == NULL) {
-				printf("file not exists\n");
-				continue;
-			}
-
-			if (file->is_reg && access(file->abs_path_time, R_OK) < 0) {
-				print_recover_usage();
-				continue;
-			}
-
-			if (file->is_dir && access(file->abs_path, R_OK) < 0) {
-				print_recover_usage();
-				continue;
-			}
-
-			if (word_count == 5 && strstr(words[4], "-") != NULL) {
-				print_recover_usage();
-				continue;
-			}
-
-			if (option_d) {
-				if (!(word_count == 3 || word_count == 5)) {
-					print_recover_usage();
-					continue;
-				}
-
-				if (strcmp(words[2], "-d") != 0) {
-					print_recover_usage();
-					continue;
-				}
-			}
-
-			if (option_n) {
-				if (word_count < 4 || word_count > 5) {
-					print_recover_usage();
-					continue;
-				}
-
-				if (word_count == 4 && strcmp(words[2], "-n") != 0) {
-					print_recover_usage();
-					continue;
-				} else if (word_count == 5 && strstr(words[3], "-n") == NULL) {
-					print_recover_usage();
-					continue;
-				}
-
-				// check new name
-				if (word_count == 4 && strcmp(words[2], "-n") == 0) {
-					if (strlen(words[3]) > 4096) {
-						fprintf(stderr, "new name can't be longer than 4096\n");
-						continue;
-					}
-					if (strstr(words[3], backup_dir) != NULL) {
-						fprintf(stderr, "\"%s\" can't be backuped\n", words[3]);
-						continue;
-					}
-
-				}
-				if (word_count == 5 && strcmp(words[3], "-n") == 0) {
-					if (strlen(words[4]) > 4096) {
-						fprintf(stderr, "new name can't be longer than 4096\n");
-						continue;
-					}
-					if (strstr(words[4], backup_dir) != NULL) {
-						fprintf(stderr, "\"%s\" can't be backuped\n", words[3]);
-						continue;
-					}
-				}
-
-			}
-			if (err) {
-				print_recover_usage();
-				continue;
-			}
-
-			int is_reg = file->is_reg;
-			int is_dir = file->is_dir;
-
-			if (is_dir && !option_d) {
-				fprintf(stderr, "recover directory with -d\n");
-				continue;
-			}
-
-			if (!(is_reg || is_dir)) {
-				fprintf(stderr, "can't access file\n");
-				continue;
-			}
-
-			if (is_reg) {  // 파일 recover
-				char p_path[4096] = {0};
-				strcpy(p_path, file->parent_path);
-				pid_t pid = fork();
-				if (pid == 0) {
-					char *args[10] = {0};
-					/*
-					   args[0] = home_dir 
-					   args[1] = backup_dir
-					   args[2] = filename's full path
-					   args[3] = backup_path
-					   args[4] = parent_path
-					   args[5] = new_name
-					   args[6] = REG or DIR
-					   args[7] = hash_func
-					 */
-					args[0] = home_dir; 
-					args[1] = backup_dir; 
-					args[2] = abs_path; 
-					args[3] = backup_path; 
-					args[4] = p_path; 
-					if (word_count == 4) args[5] = words[3];
-					else if (word_count == 5) args[5] = words[4];
-					else args[5] = "";
-
-					args[6] = "REG";
-					args[7] = hash_func;
-					execv("./recover", args);
-				} 
-				//while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-				waitpid(pid, NULL, 0);
-			} if (is_dir) {  // 디렉토리 recover
-				pid_t pid = fork();
-				if (pid == 0) {
-					char *args[7] = {0};
-					/*
-					   args[0] = home_dir 
-					   args[1] = backup_dir
-					   args[2] = filename's full path
-					   args[3] = backup_path
-					   args[4] = parent_path
-					   args[5] = new_name 
-					   args[6] = REG or DIR
-					   args[7] = hash_func
-					 */
-					args[0] = home_dir; 
-					args[1] = backup_dir; 
-					args[2] = abs_path; 
-					args[3] = backup_path; 
-					args[4] = file->parent_path; 
-					if (word_count == 4) args[5] = words[3];
-					else if (word_count == 5) args[5] = words[4];
-					else args[5] = "";
-
-					args[6] = "DIR";
-					args[7] = hash_func; 
-					execv("./recover", args);
-				}
-				while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-			}
-		} else if (strcmp(command, "ls") == 0) {
-			pid_t pid = fork();
-			if (pid == 0) {
-				char **args = (char **)calloc(word_count - 1, sizeof(char *));
-				for (int i=0; i<word_count-1; i++) {
-					args[i] = (char *)calloc(1, 10);
-					strcpy(args[i], words[i+1]);
-				}
-				execv("/bin/ls", args);
-			}
-			while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-		} else if (strcmp(command, "vi") == 0) {
-			pid_t pid = fork();
-			if (pid == 0) {
-				char **args = (char **)calloc(word_count - 1, sizeof(char *));
-				for (int i=0; i<word_count-1; i++) {
-					args[i] = (char *)calloc(1, 10);
-					strcpy(args[i], words[i+1]);
-				}
-				execv("/bin/vi", args);
-			}
-			while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-		} else if (strcmp(command, "vim") == 0) {
-			pid_t pid = fork();
-			if (pid == 0) {
-				char **args = (char **)calloc(word_count - 1, sizeof(char *));
-				for (int i=0; i<word_count-1; i++) {
-					args[i] = (char *)calloc(1, 10);
-					strcpy(args[i], words[i+1]);
-				}
-				execv("/bin/vim", args);
-			}
-			while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-		} else if (strcmp(command, "exit") == 0) {
-			exit(0);
-		} else if (strcmp(command, "help") == 0) print_help();
-		else print_help();
-
-		memset(input, 0, 200 * sizeof(char));
-
-		for(int i=0; i<word_count; i++) {
-			free(words[i]);
-		}
-		free(words);
-	}
-	return 0;
+    if(command & (CMD_ADD | CMD_REM | CMD_REC)) {
+		  ParameterInit(&parameter);
+      parameter.command = arglist[0];
+      if(ParameterProcessing(argcnt, arglist, command, &parameter) == -1) {
+        continue;
+      }
+
+      CommandExec(parameter);
+
+    } else if(command & CMD_SYS) {
+      SystemExec(arglist);
+    } else if(command & CMD_HELP || command == NOT_CMD) {
+      HelpExec();
+    }
+  }
 }
 
-
-void add_dir_tree(char *dir_name)
-{
-	char temp[4096] = {0};
-	memcpy(temp, dir_name + strlen(home_dir), strlen(dir_name) - strlen(home_dir));
-	int count = get_dir_count(dir_name) - 2;
-	char **dirs = split_dir(temp, count);
-
-	char abs_path[4096] = {0};
-	strcpy(abs_path, home_dir);
-	char parent_backup_path[4096] = {0};
-	char child_backup_path[4095] = {0};
-	strcpy(parent_backup_path, backup_dir);
-	strcpy(child_backup_path, backup_dir);
-
-	for (int i=0; i<count; i++) {
-		strcat(abs_path, "/");
-		strcat(abs_path, dirs[i]);
-		strcat(child_backup_path, "/");
-		strcat(child_backup_path, dirs[i]);
-
-		NODE *node = (NODE *)calloc(1, sizeof(NODE));
-		strcpy(node->parent_path, parent_backup_path);
-		strcat(parent_backup_path, "/");
-		strcat(parent_backup_path, dirs[i]);
-
-		strcpy(node->abs_path, abs_path);
-		strcpy(node->backup_path, child_backup_path);
-		node->is_dir = 1;
-		strcpy(node->time, get_current_time());
-		strcpy(node->abs_path_time, abs_path); 
-		strcat(node->abs_path_time, "_");
-		strcat(node->abs_path_time, node->time);
-
-		// before add, update backup tree
-		if (BACKUP_NODE->child != NULL) {
-			reset_backup_tree(BACKUP_NODE->child);
-			BACKUP_NODE->child = NULL;
-		}
-		read_backup(BACKUP_NODE, backup_dir, backup_dir);
-
-		//find parent node by abs_path 
-		NODE *pNODE = find_node_by_backup_path(HEAD, node->parent_path);
-		add_child(pNODE, node);
-	}
-
-	for(int i=0; i<count; i++) {
-		free(dirs[i]);
-	}
-	free(dirs);
-
+void Init() {
+  getcwd(exePATH, PATHMAX);
+  sprintf(homePATH, "%s", getenv("HOME"));
+  sprintf(backupPATH, "%s/backup", getenv("HOME"));
+  
+	if (access(backupPATH, F_OK))
+		mkdir(backupPATH, 0777);
 }
 
-// current_dir must abs_path or pwd
-void read_dir(NODE *parent_node, char *start_dir, char *current_dir)
-{
-	DIR *dir = opendir(current_dir);
-	if (dir == NULL) {
-		fprintf(stderr, "dir open error for %s\n", current_dir);
-		exit(1);
-	}
-
-	NODE *dir_node = (NODE *)calloc(1, sizeof(NODE));
-	strcpy(dir_node->abs_path, current_dir);
-
-	char dir_backup_path[4096] = {0};
-	strcpy(dir_backup_path, backup_dir);
-	memcpy(dir_backup_path + strlen(backup_dir), current_dir + strlen(home_dir), strlen(current_dir) - strlen(home_dir));
-	strcpy(dir_node->backup_path, dir_backup_path);
-	dir_node->is_dir = 1;
-	strcpy(dir_node->time, get_current_time());
-	strcpy(dir_node->parent_path, parent_node->backup_path);
-
-	// before add, update backup tree
-	if (BACKUP_NODE->child != NULL) {
-		reset_backup_tree(BACKUP_NODE->child);
-		BACKUP_NODE->child = NULL;
-	}
-	read_backup(BACKUP_NODE, backup_dir, backup_dir);
-	add_child(parent_node, dir_node);
-
-	struct dirent *entry;
-	while ((entry=readdir(dir)) != NULL) {
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-
-		struct stat buf;
-		char abs_path[4096] = {0};
-
-		sprintf(abs_path, "%s/%s", current_dir, entry->d_name);
-
-		if (lstat(abs_path, &buf) < 0) {
-			fprintf(stderr, "lstat err\n");
-			exit(1);
-		}
-
-		NODE *pNODE = find_node_by_backup_path(HEAD->child, dir_backup_path);
-
-		if (S_ISDIR(buf.st_mode)) {
-			read_dir(pNODE, start_dir, abs_path);
-		} else {
-			NODE *reg_node = (NODE *)calloc(1, sizeof(NODE));
-			strcpy(reg_node->abs_path, abs_path);
-			strcpy(reg_node->backup_path, pNODE->backup_path);
-			strcat(reg_node->backup_path, "/");
-			strcat(reg_node->backup_path, entry->d_name);
-			strcpy(reg_node->parent_path, pNODE->backup_path);
-			strcpy(reg_node->filename, entry->d_name);
-			reg_node->is_reg = 1;
-			reg_node->size = buf.st_size;
-			strcpy(reg_node->time, get_current_time());
-			strcpy(reg_node->abs_path_time, abs_path);
-			strcat(reg_node->abs_path_time, "_");
-			strcat(reg_node->abs_path_time, reg_node->time);
-			FILE *IN = fopen(abs_path, "r");
-			md5(IN);
-			strcpy(reg_node->hash_md5, hash);
-			memset(hash, 0, sizeof(hash));
-			fclose(IN);
-
-			FILE *IN2 = fopen(abs_path, "r");
-			sha1(IN2);
-			strcpy(reg_node->hash_sha1, hash);
-			memset(hash, 0, sizeof(hash));
-			fclose(IN2);
-
-			// before add, update backup tree
-			if (BACKUP_NODE->child != NULL) {
-				reset_backup_tree(BACKUP_NODE->child);
-				BACKUP_NODE->child = NULL;
-			}
-			read_backup(BACKUP_NODE, backup_dir, backup_dir);
-			add_child(pNODE, reg_node);
-		}
-	}
-
-	closedir(dir);
-
-}
-
-void read_backup(NODE *parent_node, char *start_dir, char *current_dir)
-{
-	DIR* dir = opendir(current_dir);
-	if (dir == NULL) {
-		fprintf(stderr, "dir open error for %s\n", current_dir);
-		exit(1);
-	}
-
-	NODE *dir_node = (NODE *)calloc(1, sizeof(NODE));
-	strcpy(dir_node->abs_path, current_dir);
-
-	dir_node->is_dir = 1;
-	strcpy(dir_node->time, get_current_time());
-	strcpy(dir_node->parent_path, parent_node->abs_path);
-
-	add_child_backup(parent_node, dir_node);
-
-	struct dirent *entry;
-	while ((entry=readdir(dir)) != NULL) {
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-
-		struct stat buf;
-		char abs_path[4096] = {0};
-
-		sprintf(abs_path, "%s/%s", current_dir, entry->d_name);
-
-		if (lstat(abs_path, &buf) < 0) {
-			fprintf(stderr, "lstat err\n");
-			exit(1);
-		}
-
-		NODE *pNODE = find_node_by_abs_path(BACKUP_NODE->child, current_dir);
-
-
-		if (S_ISDIR(buf.st_mode)) {
-			read_backup(pNODE, start_dir, abs_path);
-		} else {
-			NODE *reg_node = (NODE *)calloc(1, sizeof(NODE));
-			char abs_path_without_time[4096] = {0};
-			char *last_token = strrchr(abs_path, '_');
-			memcpy(abs_path_without_time, abs_path, strlen(abs_path) - strlen(last_token));
-
-
-			strcpy(reg_node->abs_path, abs_path_without_time);
-			strcpy(reg_node->abs_path_time, abs_path);
-			strcpy(reg_node->parent_path, pNODE->abs_path);
-			strcpy(reg_node->filename, entry->d_name);
-			reg_node->is_reg = 1;
-			reg_node->size = buf.st_size;
-
-			FILE *IN = fopen(abs_path, "r");
-			md5(IN);
-			strcpy(reg_node->hash_md5, hash);
-			memset(hash, 0, sizeof(hash));
-			fclose(IN);
-
-			FILE *IN2 = fopen(abs_path, "r");
-			sha1(IN2);
-			strcpy(reg_node->hash_sha1, hash);
-			memset(hash, 0, sizeof(hash));
-			fclose(IN2);
-
-			add_child_backup(pNODE, reg_node);
-		}
-	}
-	closedir(dir);
-}
-
-void md5(FILE *f)
-{
-	MD5_CTX c;
-	unsigned char md[MD5_DIGEST_LENGTH];
-	int fd;
-	int i;
-	static unsigned char buf1[BUFSIZE];
-
-	fd=fileno(f);
-	MD5_Init(&c);
-	for (;;)
-	{
-		i=read(fd,buf1,BUFSIZE);
-		if (i <= 0) break;
-		MD5_Update(&c,buf1,(unsigned long)i);
-	}
-	MD5_Final(&(md[0]),&c);
-
-	char temp[10] = {0};
-	for (i=0; i<MD5_DIGEST_LENGTH; i++) {
-		sprintf(temp, "%02x",md[i]);
-		strcat(hash, temp);
-	}
-}
-void sha1(FILE *f)
-{
-	SHA_CTX c;
-	unsigned char md[SHA_DIGEST_LENGTH];
-	int fd;
-	int i;
-	unsigned char buf2[BUFSIZE];
-
-	fd=fileno(f);
-	SHA1_Init(&c);
-	for (;;)
-	{
-		i=read(fd,buf2,BUFSIZE);
-		if (i <= 0) break;
-		SHA1_Update(&c,buf2,(unsigned long)i);
-	}
-	SHA1_Final(&(md[0]),&c);
-	char temp[10] = {0};
-	for (i=0; i<SHA_DIGEST_LENGTH; i++) {
-		sprintf(temp, "%02x",md[i]);
-		strcat(hash, temp);
-	}
-}
-
-void add_child(NODE *parent, NODE *new_node)
-{
-	NODE *cur = parent;
-	if (new_node->is_reg) {
-		NODE *backup_node = find_node_by_abs_path(BACKUP_NODE->child, 
-				new_node->backup_path);
-		if (backup_node != NULL) {
-			if (strcmp(hash_func, "md5") == 0) {
-				if (strcmp(backup_node->hash_md5, new_node->hash_md5) == 0) {
-					printf("\"%s\" is already backuped\n", backup_node->abs_path_time);
-					return;
-				}
-			} else {
-				if (strcmp(backup_node->hash_sha1, new_node->hash_sha1) == 0) {
-					printf("\"%s\" is already backuped\n", backup_node->abs_path_time);
-					return;
-				}
-			}
-
-
-			if (backup_node->right == NULL) {
-				pid_t pid = fork();
-				if (pid == 0) {
-					char *args[5] = {0};
-					/*
-					   args[0] = abs_path
-					   args[1] = backup_path
-					   args[2] = filename
-					   args[3] = time 
-					 */
-					args[0] = new_node->abs_path;
-					args[1] = new_node->backup_path;
-					args[2] = new_node->filename;
-					args[3] = new_node->time;
-					execv("./add", args);
-				}
-				//while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-				waitpid(pid, NULL, 0);
-
-				strcpy(new_node->abs_path, new_node->backup_path);
-				strcpy(new_node->abs_path_time, new_node->backup_path);
-				strcat(new_node->abs_path_time, "_");
-				strcat(new_node->abs_path_time, new_node->time);
-				backup_node->right = new_node;
-				printf("\"%s_%s\" backuped\n", new_node->abs_path, new_node->time);
-
-				return;
-			} else {
-				add_sib(backup_node, new_node);
-				return;
-			}
-		} else {
-
-			pid_t pid = fork();
-			if (pid == 0) {
-				char *args[5] = {0};
-				/*
-				   args[0] = abs_path
-				   args[1] = backup_path
-				   args[2] = filename
-				   args[3] = time 
-				 */
-				args[0] = new_node->abs_path;
-				args[1] = new_node->backup_path;
-				args[2] = new_node->filename;
-				args[3] = new_node->time;
-				execv("./add", args);
-			}
-			while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-			printf("\"%s_%s\" backuped\n", new_node->abs_path, new_node->time);
-
-		}
-	}
-	else if (new_node->is_dir) {
-		if (strcmp(cur->abs_path, new_node->abs_path) == 0)
-			return;
-
-		if (cur->child == NULL) {
-			cur->child = new_node;
-			mkdir(new_node->backup_path, 0775);
-			return;
-		} else {
-			if (strcmp(cur->child->abs_path, new_node->abs_path) == 0)
-				return;
-			else {
-				add_sib(cur->child, new_node);
-				return;
-			}
-		}
-	}
-
-	return;
-}
-
-void add_sib(NODE *sib, NODE *new_node)
-{
-	NODE *cur = sib;
-
-	char *last_token;
-	last_token = strrchr(cur->abs_path, '/');
-	char cur_filename[4096] = {0};
-	strcpy(cur_filename, last_token);
-
-	last_token =  strrchr(new_node->abs_path, '/');
-	char new_filename[4096] = {0};
-	strcpy(new_filename, last_token);
-
-	if (cur->right == NULL) {
-		if (new_node->is_reg) {
-
-
-			if (strcmp(cur_filename, new_filename) == 0) {
-				if (strcmp(hash_func, "md5") == 0) {
-					if (strcmp(cur->hash_md5, new_node->hash_md5) == 0) {
-						printf("\"%s\" is already backuped\n", cur->abs_path_time);
-						return;
-					}
-				} else {
-					if (strcmp(cur->hash_sha1, new_node->hash_sha1) == 0) {
-						printf("\"%s\" is already backuped\n", cur->abs_path_time);
-						return;
-					}
-				}
-			}
-
-			// cur, new_node are diffent file
-			// add file to backup dir
-			pid_t pid = fork();
-			if (pid == 0) {
-				char *args[5] = {0};
-				/*
-				   args[0] = abs_path
-				   args[1] = backup_path 
-				   args[2] = filename
-				   args[3] = time 
-				 */
-				args[0] = new_node->abs_path;
-				args[1] = new_node->backup_path;
-				args[2] = new_node->filename;
-				args[3] = new_node->time;
-				execv("./add", args);
-			}
-			while(waitpid(pid, NULL, WNOHANG) == 0) continue;
-
-			// add new_node to backup tree
-			strcpy(new_node->abs_path, new_node->backup_path);
-			strcpy(new_node->abs_path_time, new_node->backup_path);
-			strcat(new_node->abs_path_time, "_");
-			strcat(new_node->abs_path_time, new_node->time);
-			cur->right = new_node;
-			printf("\"%s_%s\" backuped\n", new_node->abs_path, new_node->time);
-			return;
-		}
-
-		// if cur_dir, new_dir are same dir, return
-		// else, mkdir, 
-		if (new_node->is_dir && strcmp(cur->abs_path, new_node->abs_path) == 0)
-			return;
-		else {
-			mkdir(new_node->backup_path, 0755);
-			cur->right = new_node;
-			return;
-		}
-	}
-
-	// cur->right != NULL
-	if (new_node->is_reg) {
-
-		if (strcmp(cur_filename, new_filename) == 0) {
-			if (strcmp(hash_func, "md5") == 0) {
-				if (strcmp(cur->hash_md5, new_node->hash_md5) == 0) {
-					printf("\"%s\" is already backuped\n", cur->abs_path_time);
-					return;
-				}
-			} else {
-				if (strcmp(cur->hash_sha1, new_node->hash_sha1) == 0) {
-					printf("\"%s\" is already backuped\n", cur->abs_path_time);
-					return;
-				}
-			}
-		} else {
-			add_sib(cur->right, new_node);
-			return;
-		}
-
-	}
-	// new_node is dir
-	add_sib(cur->right, new_node);
-	return;
-
-	return;
-
-}
-void replace_backup_path(char *dest, char *input) {
-
-	// if input was abs_path
-	if (input[0] ==  '/') {
-		strcat(dest, backup_dir);
-		memcpy(dest + strlen(backup_dir), input + strlen(home_dir), 
-				strlen(input) - strlen(home_dir));
-
-	} else {
-		// input was rel_path
-		char temp[4096] = {0};
-		char buf[4096] = {0};
-		char *pbuf;
-		pbuf = getcwd(buf, 4096);
-
-		memcpy(temp, backup_dir, strlen(backup_dir));
-		memcpy(temp + strlen(backup_dir), buf + strlen(home_dir), strlen(buf) - strlen(home_dir));
-		strcat(temp, "/");
-		strcat(temp, input);
-
-		int count = get_dir_count(temp);
-		char **dirs = split_dir(temp, count);
-
-		int top_dir_count = 0;
-		int cur_dir_count = 0;
-
-		for(int i=0; i<count; i++) {
-			if (strcmp(dirs[i], ".") == 0) cur_dir_count++;
-			else if (strcmp(dirs[i], "..") == 0) top_dir_count++;
-		}
-
-		for (int i=0; i<top_dir_count; i++) {
-			for (int j=0; j<count; j++){
-				if (strcmp(dirs[j], "..") == 0) {
-					for (int k=j+1; k<count;k++){
-						strcpy(dirs[k-2], dirs[k]);
-					}
-				}
-			}
-		}
-		for(int i=0; i<count - (2 * top_dir_count); i++) { 
-			if (strcmp(dirs[i], ".") != 0) {
-				strcat(dest, "/");
-				strcat(dest, dirs[i]);
-			}
-		}
-		for (int i=0; i<count; i++)
-			free(dirs[i]);
-		free(dirs);
-	}
-}
-
-void replace_abs_path(char *dest, char *input) {
-	if (input[0] ==  '/') {
-		strcpy(dest, input);
-
-	} else {
-		char buf[4096] = {0};
-		char *pbuf;
-		pbuf = getcwd(buf, 4096);
-
-		strcat(dest, buf);
-		strcat(dest, "/");
-		strcat(dest, input);
-	}
+int main(int argc, char* argv[]) {
+  Init();
+
+  if(!strcmp(argv[0], "command")) {
+    hash = atoi(argv[1]);
+
+    CommandFun(argv+2);
+  } else if(!strcmp(argv[0], "help")) {
+    help();
+  } else {
+    if (argc < 2) {
+      fprintf(stderr, "usage : %s <md5 | sha1>\n", argv[0]);
+      return -1;
+    }
+
+    strcpy(exeNAME, argv[0]);
+
+    if(strcmp(argv[1], "md5") && strcmp(argv[1], "sha1")) {
+      fprintf(stderr, "input error: wrong hash <md5 | sha1>\n");
+      return -1;
+    }
+    
+    if(!strcmp(argv[1], "md5")) {
+      hash = HASH_MD5;
+    }
+    if(!strcmp(argv[1], "sha1")) {
+      hash = HASH_SHA1;
+    }
+
+    Prompt();
+  }
+	
+	exit(0);
 }
